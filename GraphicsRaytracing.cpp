@@ -1,13 +1,14 @@
-﻿#include <windows.h>
+#include <windows.h>
 #include <vector>
 #include <cmath>
 #include <iostream>
 #include <algorithm>
 
 
-const int canvasWidth = 600;
-const int canvasHeight = 600;
+const int canvasWidth = 800;
+const int canvasHeight = 800;
 std::vector<DWORD> canvasBuffer;
+const float EPSILON = 0.001f;
 
 enum class LightType {
     AMBIENT = 0,
@@ -27,6 +28,7 @@ struct Sphere {
     Vector3 center;
     float radius;
     Color color;
+    int specular;
 };
 
 struct Light {
@@ -36,11 +38,11 @@ struct Light {
 };
 
 void PutPixel(int x, int y, Color color) {
-    x = canvasWidth / 2 + x;
-    y = canvasHeight / 2 - y - 1;
+    int x_r = canvasWidth / 2 + x;
+    int y_r = canvasHeight / 2 - y;
 
-    if (x >= 0 && x < canvasWidth && y >= 0 && y < canvasHeight) {
-        int offset = x + canvasWidth * y;
+    if (x_r >= 0 && x_r < canvasWidth && y_r >= 0 && y_r < canvasHeight) {
+        int offset = x_r + canvasWidth * y_r;
         canvasBuffer[offset] = RGB(color.b, color.g, color.r);
     }
 }
@@ -117,42 +119,12 @@ Color Clamp(Color c) {
 
 
 Vector3 CanvasToViewport(int x, int y) {
-    static float viewportSize = 1.0f;
+    static float viewportSize_x = 1.0f;
+    static float viewportSize_y = 1.0f;
     static float projectionPlaneZ = 1.0f;
-    return { x * viewportSize / canvasWidth,
-             y * viewportSize / canvasHeight,
+    return { x * viewportSize_x / canvasWidth,
+             y * viewportSize_y / canvasHeight,
              projectionPlaneZ };
-}
-
-float ComputeLighting(Vector3 point, Vector3 normal,
-    const std::vector<Light>& lights) {
-    float intensity = 0.0f;
-    float length_n = Length(normal);  // Should be 1.0, but just in case...
-
-    for (size_t i = 0; i < lights.size(); i++) {
-        auto& light = lights[i];
-
-        if (light.ltype == LightType::AMBIENT) {
-            intensity += light.intensity;
-        }
-        else {
-            Vector3 vec_l;
-            if (light.ltype == LightType::POINT) {
-                vec_l = Subtract(light.position, point);
-            }
-            else {  // Light.DIRECTIONAL
-                vec_l = light.position;
-            }
-
-            auto n_dot_l = DotProduct(normal, vec_l);
-
-            if (n_dot_l > 0)
-                intensity +=
-                light.intensity * n_dot_l / (length_n * Length(vec_l));
-        }
-    }
-
-    return intensity;
 }
 
 std::pair<float, float> IntersectRaySphere(Vector3 origin, Vector3 direction,
@@ -171,6 +143,68 @@ std::pair<float, float> IntersectRaySphere(Vector3 origin, Vector3 direction,
     float t1 = (-k2 + std::sqrt(discriminant)) / (2 * k1);
     float t2 = (-k2 - std::sqrt(discriminant)) / (2 * k1);
     return { t1, t2 };
+}
+
+float ComputeLighting(Vector3 point, Vector3 normal, Vector3 view,
+    const std::vector<Light>& lights, const std::vector<Sphere>& spheres,
+    int specular) {
+    float intensity = 0.0f;
+    float length_n = Length(normal);  // Should be 1.0, but just in case...
+    float length_v = Length(view);
+
+    for (size_t i = 0; i < lights.size(); i++) {
+        auto& light = lights[i];
+
+        if (light.ltype == LightType::AMBIENT) {
+            intensity += light.intensity;
+        }
+        else {
+            Vector3 vec_l;
+            float t_max;
+            if (light.ltype == LightType::POINT) {
+                vec_l = Subtract(light.position, point);
+                t_max = 1.0f;
+            }
+            else {  // Light.DIRECTIONAL
+                vec_l = light.position;
+                t_max = INFINITY;
+            }
+
+            bool is_shadow = false;
+            for (const auto& sphere : spheres) {
+                auto ts = IntersectRaySphere(point, vec_l, sphere);
+                if (EPSILON < ts.first && ts.first < t_max) {
+                    is_shadow = true;
+                    break;
+                }
+                if (EPSILON < ts.second && ts.second < t_max) {
+                    is_shadow = true;
+                    break;
+                }
+            }
+            if (is_shadow) continue;
+
+            // Diffuse reflection
+            auto n_dot_l = DotProduct(normal, vec_l);
+            if (n_dot_l > 0)
+                intensity +=
+                    light.intensity * n_dot_l / (length_n * Length(vec_l));
+
+            // Specular reflection
+            if (specular >= 0) {
+                Vector3 vec_r = 
+                    Subtract(Multiply(2.0f * DotProduct(normal, vec_l), normal),
+                             vec_l);
+
+                float r_dot_v = DotProduct(vec_r, view);
+                if (r_dot_v > 0)
+                    intensity += light.intensity *
+                        std::pow(r_dot_v / (Length(vec_r) * length_v), specular);
+            }
+        }
+    }
+
+    return intensity;
 }
 
 Color TraceRay(Vector3 origin, Vector3 direction, float min_t, float max_t,
@@ -198,9 +232,12 @@ Color TraceRay(Vector3 origin, Vector3 direction, float min_t, float max_t,
 
     Vector3 point = Add(origin, Multiply(closest_t, direction));
     Vector3 normal = Subtract(point, closestSphere->center);
-    normal = Multiply(1.0 / Length(normal), normal);
+    normal = Multiply(1.0f / Length(normal), normal);
 
-    return Multiply(ComputeLighting(point, normal, lights), closestSphere->color);
+    auto view = Multiply(-1, direction);
+    auto light_intensity = ComputeLighting(point, normal, view, lights, spheres,
+                                           closestSphere->specular);
+    return Multiply(light_intensity, closestSphere->color);
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -233,17 +270,17 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     // Scene setup
     const Vector3 cameraPosition = { 0, 0, 0 };
     const std::vector<Sphere> spheres = {
-        { {0, -1, 3}, 1, {0, 0, 255} },
-        { {2, 0, 4}, 1, {255, 0, 0} },
-        { {-2, 0, 4 }, 1, { 0, 255, 0} },
-        { {0, -5001, 0}, 5000, {0, 255, 255} }
+        { {0, -1, 3}, 1, {0, 0, 255}, 500 }, // red sphere
+        { {2, 0, 4}, 1, {255, 0, 0}, 500 }, // blue sphere
+        { {-2, 0, 4 }, 1, { 0, 255, 0}, 10 }, // green sphere
+        { {0, -5001, 0}, 5000, {0, 255, 255}, 1000 } // yellow sphere
     };
 
     // Lights setup
     const std::vector<Light> lights = {
-        { LightType::AMBIENT, 0.2, {INFINITY, INFINITY, INFINITY} },
-        { LightType::POINT, 0.6, {2, 1, 0} },
-        { LightType::DIRECTIONAL, 0.2, {1, 4, 4} }
+        { LightType::AMBIENT, 0.2f, {INFINITY, INFINITY, INFINITY} },
+        { LightType::POINT, 0.6f, {2, 1, 0} },
+        { LightType::DIRECTIONAL, 0.2f, {1, 4, 4} }
     };
 
     // Main rendering loop.
@@ -253,7 +290,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
         for (int y = -canvasHeight / 2; y < canvasHeight / 2; ++y) {
             Vector3 direction = CanvasToViewport(x, y);
             Color color = TraceRay(cameraPosition, direction, 1, INFINITY,
-                spheres, lights);
+                                   spheres, lights);
             PutPixel(x, y, Clamp(color));
         }
     }
@@ -267,8 +304,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     RegisterClass(&wc);
 
     // Create the window
-    HWND hwnd = CreateWindowEx(0, L"RaytracerDemo", L"Raytracer Demo", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, canvasWidth, canvasHeight, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND hwnd = CreateWindowEx(0, L"RaytracerDemo", L"Raytracer Demo",
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, canvasWidth,
+        canvasHeight + 40, nullptr, nullptr, wc.hInstance, nullptr);
 
     if (hwnd == nullptr) {
         MessageBox(nullptr, L"Window creation failed", L"Error", MB_ICONERROR);

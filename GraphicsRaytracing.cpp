@@ -5,8 +5,9 @@
 #include <algorithm>
 
 
-const int canvasWidth = 800;
-const int canvasHeight = 800;
+const int CANVAS_WIDTH = 600;
+const int CANVAS_HEIGHT = 600;
+const int RECURSION_DEPTH = 3; // 0, 1, 2, 3, 5
 std::vector<DWORD> canvasBuffer;
 const float EPSILON = 0.001f;
 
@@ -24,11 +25,14 @@ struct Color {
     unsigned b, g, r;
 };
 
+const Color BACKGROUND_COLOR = {0, 0, 0};
+
 struct Sphere {
     Vector3 center;
     float radius;
     Color color;
     int specular;
+    float reflective; // [0.f, 1.f]
 };
 
 struct Light {
@@ -38,22 +42,22 @@ struct Light {
 };
 
 void PutPixel(int x, int y, Color color) {
-    int x_r = canvasWidth / 2 + x;
-    int y_r = canvasHeight / 2 - y;
+    int x_r = CANVAS_WIDTH / 2 + x;
+    int y_r = CANVAS_HEIGHT / 2 - y;
 
-    if (x_r >= 0 && x_r < canvasWidth && y_r >= 0 && y_r < canvasHeight) {
-        int offset = x_r + canvasWidth * y_r;
+    if (x_r >= 0 && x_r < CANVAS_WIDTH && y_r >= 0 && y_r < CANVAS_HEIGHT) {
+        int offset = x_r + CANVAS_WIDTH * y_r;
         canvasBuffer[offset] = RGB(color.b, color.g, color.r);
     }
 }
 
-void UpdateCanvas(HWND hwnd, HDC hdc, int canvasWidth, int canvasHeight) {
+void UpdateCanvas(HWND hwnd, HDC hdc, int CANVAS_WIDTH, int CANVAS_HEIGHT) {
     BITMAPINFO bmi;
     ZeroMemory(&bmi, sizeof(BITMAPINFO));
 
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = canvasWidth;
-    bmi.bmiHeader.biHeight = -canvasHeight;  // Negative height to ensure top-down drawing
+    bmi.bmiHeader.biWidth = CANVAS_WIDTH;
+    bmi.bmiHeader.biHeight = -CANVAS_HEIGHT;  // Negative height to ensure top-down drawing
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 32;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -62,8 +66,8 @@ void UpdateCanvas(HWND hwnd, HDC hdc, int canvasWidth, int canvasHeight) {
     bmi.bmiHeader.biClrUsed = 0;
     bmi.bmiHeader.biClrImportant = 0;
 
-    SetDIBitsToDevice(hdc, 0, 0, canvasWidth, canvasHeight, 0, 0, 0,
-        canvasHeight, canvasBuffer.data(), &bmi, DIB_RGB_COLORS);
+    SetDIBitsToDevice(hdc, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, 0, 0, 0,
+        CANVAS_HEIGHT, canvasBuffer.data(), &bmi, DIB_RGB_COLORS);
 }
 
 
@@ -106,6 +110,11 @@ Color Multiply(float i, Color c) {
     return { (unsigned)(i * c.b), (unsigned)(i * c.g), (unsigned)(i * c.r) };
 }
 
+// Computes color1 + color2.
+Color Add(Color c1, Color c2) {
+    return { c1.b + c2.b, c1.g + c2.g, c1.r + c2.r };
+}
+
 // Clamps a color to the canonical color range.
 Color Clamp(Color c) {
     return {
@@ -118,12 +127,16 @@ Color Clamp(Color c) {
 // =============================================================================
 
 
+Vector3 ReflectRayDirection(Vector3 v1, Vector3 v2) {
+    return Subtract(Multiply(2 * DotProduct(v1, v2), v2), v1);
+}
+
 Vector3 CanvasToViewport(int x, int y) {
     static float viewportSize_x = 1.0f;
     static float viewportSize_y = 1.0f;
     static float projectionPlaneZ = 1.0f;
-    return { x * viewportSize_x / canvasWidth,
-             y * viewportSize_y / canvasHeight,
+    return { x * viewportSize_x / CANVAS_WIDTH,
+             y * viewportSize_y / CANVAS_HEIGHT,
              projectionPlaneZ };
 }
 
@@ -147,7 +160,7 @@ std::pair<float, float> IntersectRaySphere(Vector3 origin, Vector3 direction,
 
 float ComputeLighting(Vector3 point, Vector3 normal, Vector3 view,
     const std::vector<Light>& lights, const std::vector<Sphere>& spheres,
-    int specular) {
+    int specular, const Sphere* sphere_tag) {
     float intensity = 0.0f;
     float length_n = Length(normal);  // Should be 1.0, but just in case...
     float length_v = Length(view);
@@ -172,6 +185,9 @@ float ComputeLighting(Vector3 point, Vector3 normal, Vector3 view,
 
             bool is_shadow = false;
             for (const auto& sphere : spheres) {
+                if (sphere_tag == &sphere)
+                    continue;
+
                 auto ts = IntersectRaySphere(point, vec_l, sphere);
                 if (EPSILON < ts.first && ts.first < t_max) {
                     is_shadow = true;
@@ -188,18 +204,16 @@ float ComputeLighting(Vector3 point, Vector3 normal, Vector3 view,
             auto n_dot_l = DotProduct(normal, vec_l);
             if (n_dot_l > 0)
                 intensity +=
-                    light.intensity * n_dot_l / (length_n * Length(vec_l));
+                light.intensity * n_dot_l / (length_n * Length(vec_l));
 
             // Specular reflection
             if (specular >= 0) {
-                Vector3 vec_r = 
-                    Subtract(Multiply(2.0f * DotProduct(normal, vec_l), normal),
-                             vec_l);
+                Vector3 vec_r = ReflectRayDirection(vec_l, normal);
 
                 float r_dot_v = DotProduct(vec_r, view);
                 if (r_dot_v > 0)
                     intensity += light.intensity *
-                        std::pow(r_dot_v / (Length(vec_r) * length_v), specular);
+                    std::pow(r_dot_v / (Length(vec_r) * length_v), specular);
             }
         }
     }
@@ -208,36 +222,51 @@ float ComputeLighting(Vector3 point, Vector3 normal, Vector3 view,
 }
 
 Color TraceRay(Vector3 origin, Vector3 direction, float min_t, float max_t,
-    const std::vector<Sphere>& spheres, const std::vector<Light>& lights) {
+    const std::vector<Sphere>& spheres, const std::vector<Light>& lights,
+    int depth, const Sphere* sphere_tag) {
     float closest_t = INFINITY;
-    const Sphere* closestSphere = nullptr;
+    const Sphere* closest_sphere = nullptr;
 
     for (const auto& sphere : spheres) {
+        if (sphere_tag == &sphere)
+            continue;
+
         auto ts = IntersectRaySphere(origin, direction, sphere);
         if (ts.first < closest_t && min_t < ts.first && ts.first < max_t) {
             closest_t = ts.first;
-            closestSphere = &sphere;
+            closest_sphere = &sphere;
         }
         if (ts.second < closest_t && min_t < ts.second && ts.second < max_t) {
             closest_t = ts.second;
-            closestSphere = &sphere;
+            closest_sphere = &sphere;
         }
     }
 
-    if (closestSphere == nullptr) {
-        return { 255, 255, 255 }; // Background color white
-    }
+    if (closest_sphere == nullptr)
+        return BACKGROUND_COLOR; // Background color white
 
-    //return closestSphere->color;
+    //return closest_sphere->color;
 
     Vector3 point = Add(origin, Multiply(closest_t, direction));
-    Vector3 normal = Subtract(point, closestSphere->center);
+    Vector3 normal = Subtract(point, closest_sphere->center);
     normal = Multiply(1.0f / Length(normal), normal);
 
     auto view = Multiply(-1, direction);
     auto light_intensity = ComputeLighting(point, normal, view, lights, spheres,
-                                           closestSphere->specular);
-    return Multiply(light_intensity, closestSphere->color);
+        closest_sphere->specular, closest_sphere);
+    // return Multiply(light_intensity, closest_sphere->color);
+    auto local_color = Multiply(light_intensity, closest_sphere->color);
+
+    if (closest_sphere->reflective <= 0 || depth <= 0)
+        return local_color;
+
+    auto reflected_ray_direction = ReflectRayDirection(view, normal);
+    auto reflected_color = TraceRay(point, reflected_ray_direction, EPSILON,
+                                    INFINITY, spheres, lights, depth - 1,
+                                    closest_sphere);
+
+    return Add(Multiply(1 - closest_sphere->reflective, local_color),
+               Multiply(closest_sphere->reflective, reflected_color));
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -247,7 +276,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
     switch (message) {
     case WM_PAINT:
         hdc = BeginPaint(hwnd, &ps);
-        UpdateCanvas(hwnd, hdc, canvasWidth, canvasHeight);
+        UpdateCanvas(hwnd, hdc, CANVAS_WIDTH, CANVAS_HEIGHT);
         EndPaint(hwnd, &ps);
         break;
 
@@ -265,15 +294,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) 
 int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     _In_ LPSTR lpCmdLine, _In_ int nCmdShow) {
     // Initialize canvas buffer
-    canvasBuffer.resize(canvasWidth * canvasHeight);
+    canvasBuffer.resize(CANVAS_WIDTH * CANVAS_HEIGHT);
 
     // Scene setup
     const Vector3 cameraPosition = { 0, 0, 0 };
     const std::vector<Sphere> spheres = {
-        { {0, -1, 3}, 1, {0, 0, 255}, 500 }, // red sphere
-        { {2, 0, 4}, 1, {255, 0, 0}, 500 }, // blue sphere
-        { {-2, 0, 4 }, 1, { 0, 255, 0}, 10 }, // green sphere
-        { {0, -5001, 0}, 5000, {0, 255, 255}, 1000 } // yellow sphere
+        { {0, -1, 3}, 1, {0, 0, 255}, 500, 0.2f }, // red sphere
+        { {2, 0, 4}, 1, {255, 0, 0}, 500, 0.3f }, // blue sphere
+        { {-2, 0, 4 }, 1, { 0, 255, 0}, 10, 0.4f }, // green sphere
+        { {0, -5001, 0}, 5000, {0, 255, 255}, 1000, 0.5f } // yellow sphere
     };
 
     // Lights setup
@@ -286,11 +315,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     // Main rendering loop.
     // the range of the x coordinate is [ –Cw/2, Cw/2 ) and the range of the y
     // coordinate is [ –Ch/2, Ch/2 ).
-    for (int x = -canvasWidth / 2; x < canvasWidth / 2; ++x) {
-        for (int y = -canvasHeight / 2; y < canvasHeight / 2; ++y) {
+    for (int x = -CANVAS_WIDTH / 2; x < CANVAS_WIDTH / 2; ++x) {
+        for (int y = -CANVAS_HEIGHT / 2; y < CANVAS_HEIGHT / 2; ++y) {
             Vector3 direction = CanvasToViewport(x, y);
             Color color = TraceRay(cameraPosition, direction, 1, INFINITY,
-                                   spheres, lights);
+                spheres, lights, RECURSION_DEPTH, nullptr);
             PutPixel(x, y, Clamp(color));
         }
     }
@@ -305,8 +334,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 
     // Create the window
     HWND hwnd = CreateWindowEx(0, L"RaytracerDemo", L"Raytracer Demo",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, canvasWidth,
-        canvasHeight + 40, nullptr, nullptr, wc.hInstance, nullptr);
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CANVAS_WIDTH,
+        CANVAS_HEIGHT + 40, nullptr, nullptr, wc.hInstance, nullptr);
 
     if (hwnd == nullptr) {
         MessageBox(nullptr, L"Window creation failed", L"Error", MB_ICONERROR);

@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <vector>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <algorithm>
@@ -19,6 +20,17 @@ enum class LightType {
 
 struct Vector3 {
     float x, y, z;
+};
+
+struct Matrix3 {
+    std::array<float, 9> matrix_buf;
+    Vector3 line0 = { matrix_buf[0], matrix_buf[1], matrix_buf[2] };
+    Vector3 line1 = { matrix_buf[3], matrix_buf[4], matrix_buf[5] };
+    Vector3 line2 = { matrix_buf[6], matrix_buf[7], matrix_buf[8] };
+
+    Vector3 col0 = { matrix_buf[0], matrix_buf[3], matrix_buf[6] };
+    Vector3 col1 = { matrix_buf[1], matrix_buf[4], matrix_buf[7] };
+    Vector3 col2 = { matrix_buf[2], matrix_buf[5], matrix_buf[8] };
 };
 
 struct Color {
@@ -41,7 +53,7 @@ struct Light {
     Vector3 position;
 };
 
-void PutPixel(int x, int y, Color color) {
+void PutPixel(int x, int y, const Color& color) {
     int x_r = CANVAS_WIDTH / 2 + x;
     int y_r = CANVAS_HEIGHT / 2 - y;
 
@@ -75,48 +87,45 @@ void UpdateCanvas(HWND hwnd, HDC hdc, int CANVAS_WIDTH, int CANVAS_HEIGHT) {
 //                         Vector3 operating routines
 // =============================================================================
 
-float DotProduct(Vector3 v1, Vector3 v2) {
+float DotProduct(const Vector3& v1, const Vector3& v2) {
     return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
 }
 
-Vector3 Subtract(Vector3 v1, Vector3 v2) {
+Vector3 Subtract(const Vector3& v1, const Vector3& v2) {
     return { v1.x - v2.x, v1.y - v2.y, v1.z - v2.z };
 }
 
 // Length of a 3D vector.
-float Length(Vector3 v) {
+float Length(const Vector3& v) {
     return std::sqrt(DotProduct(v, v));
 }
 
 // Computes k * vec.
-Vector3 Multiply(float k, Vector3 v) {
+Vector3 Multiply(float k, const Vector3& v) {
     return { k * v.x, k * v.y, k * v.z };
 }
 
 // Computes v1 + v2.
-Vector3 Add(Vector3 v1, Vector3 v2) {
+Vector3 Add(const Vector3& v1, const Vector3& v2) {
     return { v1.x + v2.x, v1.y + v2.y, v1.z + v2.z };
 }
-
-// =============================================================================
-
 
 // =============================================================================
 //                            Color operating routines                
 // =============================================================================
 
 // Computes i * color.
-Color Multiply(float i, Color c) {
+Color Multiply(float i, const Color& c) {
     return { (unsigned)(i * c.b), (unsigned)(i * c.g), (unsigned)(i * c.r) };
 }
 
 // Computes color1 + color2.
-Color Add(Color c1, Color c2) {
+Color Add(const Color& c1, const Color& c2) {
     return { c1.b + c2.b, c1.g + c2.g, c1.r + c2.r };
 }
 
 // Clamps a color to the canonical color range.
-Color Clamp(Color c) {
+Color Clamp(const Color& c) {
     return {
         min(255, max(0, c.b)),
         min(255, max(0, c.g)),
@@ -125,10 +134,23 @@ Color Clamp(Color c) {
 }
 
 // =============================================================================
+//                            Matrix operating routines                
+// =============================================================================
+
+// Multiplies a matrix and a vector.
+Vector3 MultiplyMV(const Matrix3& mat, const Vector3& vec) {
+    Vector3 result = { 0.f, 0.f, 0.f };
+
+    result.x = DotProduct(mat.line0, vec);
+    result.y = DotProduct(mat.line1, vec);
+    result.z = DotProduct(mat.line2, vec);
+
+    return result;
+}
 
 
-Vector3 ReflectRayDirection(Vector3 v1, Vector3 v2) {
-    return Subtract(Multiply(2 * DotProduct(v1, v2), v2), v1);
+Vector3 ReflectRayDirection(const Vector3& ray, const Vector3& normal) {
+    return Subtract(Multiply(2 * DotProduct(ray, normal), normal), ray);
 }
 
 Vector3 CanvasToViewport(int x, int y) {
@@ -140,8 +162,8 @@ Vector3 CanvasToViewport(int x, int y) {
              projectionPlaneZ };
 }
 
-std::pair<float, float> IntersectRaySphere(Vector3 origin, Vector3 direction,
-    const Sphere& sphere) {
+std::pair<float, float> IntersectRaySphere(const Vector3& origin,
+    const Vector3& direction, const Sphere& sphere) {
     Vector3 oc = Subtract(origin, sphere.center);
 
     float k1 = DotProduct(direction, direction);
@@ -158,9 +180,9 @@ std::pair<float, float> IntersectRaySphere(Vector3 origin, Vector3 direction,
     return { t1, t2 };
 }
 
-float ComputeLighting(Vector3 point, Vector3 normal, Vector3 view,
-    const std::vector<Light>& lights, const std::vector<Sphere>& spheres,
-    int specular, const Sphere* sphere_tag) {
+float ComputeLighting(const Vector3& point, const Vector3& normal,
+    const Vector3& view, const std::vector<Light>& lights,
+    const std::vector<Sphere>& spheres, int specular, const Sphere* sphere_tag) {
     float intensity = 0.0f;
     float length_n = Length(normal);  // Should be 1.0, but just in case...
     float length_v = Length(view);
@@ -221,9 +243,14 @@ float ComputeLighting(Vector3 point, Vector3 normal, Vector3 view,
     return intensity;
 }
 
-Color TraceRay(Vector3 origin, Vector3 direction, float min_t, float max_t,
-    const std::vector<Sphere>& spheres, const std::vector<Light>& lights,
-    int depth, const Sphere* sphere_tag) {
+// color = (1 - r) * local_color + r * reflected_color || color = background_color
+// reflected_color = (1 - r1) * local_color1 + r1 * reflected_color1 || reflected_color = background_color
+// reflected_color1 = (1 - r2) * local_color2 + r2 * reflected_color2 || reflected_color1 = background_color
+// reflected_color2 = (1 - r3) * local_color3 + r3 * reflected_color3 || reflected_color2 = background_color
+// ... ... ... ...
+Color TraceRay(const Vector3& origin, const Vector3& direction, float min_t,
+    float max_t, const std::vector<Sphere>& spheres,
+    const std::vector<Light>& lights, int depth, const Sphere* sphere_tag) {
     float closest_t = INFINITY;
     const Sphere* closest_sphere = nullptr;
 
@@ -297,8 +324,15 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     canvasBuffer.resize(CANVAS_WIDTH * CANVAS_HEIGHT);
 
     // Scene setup
-    const Vector3 cameraPosition = { 0, 0, 0 };
-    const std::vector<Sphere> spheres = {
+    const Vector3 CAMERA_POSITION = { 3, 0, 1 };
+
+    const Matrix3 CAMERA_ROTATION = { 
+        0.7071, 0, -0.7071,
+        0, 1, 0,
+        0.7071, 0, 0.7071
+    };
+
+    const std::vector<Sphere> SPHERES = {
         { {0, -1, 3}, 1, {0, 0, 255}, 500, 0.2f }, // red sphere
         { {2, 0, 4}, 1, {255, 0, 0}, 500, 0.3f }, // blue sphere
         { {-2, 0, 4 }, 1, { 0, 255, 0}, 10, 0.4f }, // green sphere
@@ -306,7 +340,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     };
 
     // Lights setup
-    const std::vector<Light> lights = {
+    const std::vector<Light> LIGHTS = {
         { LightType::AMBIENT, 0.2f, {INFINITY, INFINITY, INFINITY} },
         { LightType::POINT, 0.6f, {2, 1, 0} },
         { LightType::DIRECTIONAL, 0.2f, {1, 4, 4} }
@@ -318,8 +352,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     for (int x = -CANVAS_WIDTH / 2; x < CANVAS_WIDTH / 2; ++x) {
         for (int y = -CANVAS_HEIGHT / 2; y < CANVAS_HEIGHT / 2; ++y) {
             Vector3 direction = CanvasToViewport(x, y);
-            Color color = TraceRay(cameraPosition, direction, 1, INFINITY,
-                spheres, lights, RECURSION_DEPTH, nullptr);
+            direction = MultiplyMV(CAMERA_ROTATION, direction);
+            Color color = TraceRay(CAMERA_POSITION, direction, 1, INFINITY,
+                SPHERES, LIGHTS, RECURSION_DEPTH, nullptr);
             PutPixel(x, y, Clamp(color));
         }
     }

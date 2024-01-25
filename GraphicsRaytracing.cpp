@@ -153,12 +153,12 @@ Vector3 ReflectRayDirection(const Vector3& ray, const Vector3& normal) {
     return Subtract(Multiply(2 * DotProduct(ray, normal), normal), ray);
 }
 
-Vector3 CanvasToViewport(int x, int y) {
+Vector3 CanvasToViewport(int canvas_x, int canvas_y) {
     static float viewportSize_x = 1.0f;
     static float viewportSize_y = 1.0f;
     static float projectionPlaneZ = 1.0f;
-    return { x * viewportSize_x / CANVAS_WIDTH,
-             y * viewportSize_y / CANVAS_HEIGHT,
+    return { canvas_x * viewportSize_x / CANVAS_WIDTH,
+             canvas_y* viewportSize_y / CANVAS_HEIGHT,
              projectionPlaneZ };
 }
 
@@ -327,9 +327,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     const Vector3 CAMERA_POSITION = { 3, 0, 1 };
 
     const Matrix3 CAMERA_ROTATION = { 
-        0.7071, 0, -0.7071,
-        0, 1, 0,
-        0.7071, 0, 0.7071
+        0.7071f, 0.f, -0.7071f,
+        0.f, 1.f, 0.f,
+        0.7071f, 0, 0.7071f
     };
 
     const std::vector<Sphere> SPHERES = {

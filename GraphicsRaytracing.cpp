@@ -4,7 +4,9 @@
 #include <cmath>
 #include <iostream>
 #include <algorithm>
-
+#include <chrono>
+#include <string>
+#include <thread>
 
 const int CANVAS_WIDTH = 600;
 const int CANVAS_HEIGHT = 600;
@@ -37,8 +39,6 @@ struct Color {
     unsigned b, g, r;
 };
 
-const Color BACKGROUND_COLOR = {0, 0, 0};
-
 struct Sphere {
     Vector3 center;
     float radius;
@@ -52,6 +52,31 @@ struct Light {
     float intensity;
     Vector3 position;
 };
+
+// Scene setup
+const Vector3 CAMERA_POSITION = { 3, 0, 1 };
+
+const Matrix3 CAMERA_ROTATION = {
+    0.7071f, 0.f, -0.7071f,
+    0.f, 1.f, 0.f,
+    0.7071f, 0, 0.7071f
+};
+
+const std::vector<Sphere> SPHERES = {
+    { {0, -1, 3}, 1, {0, 0, 255}, 500, 0.2f }, // red sphere
+    { {2, 0, 4}, 1, {255, 0, 0}, 500, 0.3f }, // blue sphere
+    { {-2, 0, 4 }, 1, { 0, 255, 0}, 10, 0.4f }, // green sphere
+    { {0, -5001, 0}, 5000, {0, 255, 255}, 1000, 0.5f } // yellow sphere
+};
+
+// Lights setup
+const std::vector<Light> LIGHTS = {
+    { LightType::AMBIENT, 0.2f, {INFINITY, INFINITY, INFINITY} },
+    { LightType::POINT, 0.6f, {2, 1, 0} },
+    { LightType::DIRECTIONAL, 0.2f, {1, 4, 4} }
+};
+
+const Color BACKGROUND_COLOR = {0, 0, 0};
 
 void PutPixel(int x, int y, const Color& color) {
     int x_r = CANVAS_WIDTH / 2 + x;
@@ -250,7 +275,7 @@ float ComputeLighting(const Vector3& point, const Vector3& normal,
 // ... ... ... ...
 Color TraceRay(const Vector3& origin, const Vector3& direction, float min_t,
     float max_t, const std::vector<Sphere>& spheres,
-    const std::vector<Light>& lights, int depth, const Sphere* sphere_tag) {
+    const std::vector<Light>& lights, int depth, const Sphere* sphere_tag/*, const Cache* cache*/) {
     float closest_t = INFINITY;
     const Sphere* closest_sphere = nullptr;
 
@@ -258,7 +283,7 @@ Color TraceRay(const Vector3& origin, const Vector3& direction, float min_t,
         if (sphere_tag == &sphere)
             continue;
 
-        auto ts = IntersectRaySphere(origin, direction, sphere);
+        auto ts = IntersectRaySphere(origin, direction, sphere/*, cache*/);
         if (ts.first < closest_t && min_t < ts.first && ts.first < max_t) {
             closest_t = ts.first;
             closest_sphere = &sphere;
@@ -272,8 +297,6 @@ Color TraceRay(const Vector3& origin, const Vector3& direction, float min_t,
     if (closest_sphere == nullptr)
         return BACKGROUND_COLOR; // Background color white
 
-    //return closest_sphere->color;
-
     Vector3 point = Add(origin, Multiply(closest_t, direction));
     Vector3 normal = Subtract(point, closest_sphere->center);
     normal = Multiply(1.0f / Length(normal), normal);
@@ -281,7 +304,7 @@ Color TraceRay(const Vector3& origin, const Vector3& direction, float min_t,
     auto view = Multiply(-1, direction);
     auto light_intensity = ComputeLighting(point, normal, view, lights, spheres,
         closest_sphere->specular, closest_sphere);
-    // return Multiply(light_intensity, closest_sphere->color);
+
     auto local_color = Multiply(light_intensity, closest_sphere->color);
 
     if (closest_sphere->reflective <= 0 || depth <= 0)
@@ -294,6 +317,23 @@ Color TraceRay(const Vector3& origin, const Vector3& direction, float min_t,
 
     return Add(Multiply(1 - closest_sphere->reflective, local_color),
                Multiply(closest_sphere->reflective, reflected_color));
+}
+
+void RenderSection(int start_y, int end_y, const std::vector<Sphere>& spheres,
+    const std::vector<Light>& lights, const Matrix3& camera_rotation,
+    const Vector3& camera_position) {
+
+    for (int y = start_y; y < end_y; ++y) {
+        for (int x = -CANVAS_WIDTH / 2; x < CANVAS_WIDTH / 2; ++x) {
+            Vector3 direction = CanvasToViewport(x, y);
+            direction = MultiplyMV(camera_rotation, direction);
+
+            Color color = TraceRay(camera_position, direction, 1, INFINITY,
+                spheres, lights, RECURSION_DEPTH, nullptr/*, &cache*/);
+
+            PutPixel(x, y, Clamp(color));
+        }
+    }
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -323,42 +363,37 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     // Initialize canvas buffer
     canvasBuffer.resize(CANVAS_WIDTH * CANVAS_HEIGHT);
 
-    // Scene setup
-    const Vector3 CAMERA_POSITION = { 3, 0, 1 };
+    // Determine the number of threads to use
+    unsigned int num_threads = 16;// std::thread::hardware_concurrency();
+    std::vector<std::thread> threads(num_threads);
+    int section_width = CANVAS_HEIGHT / num_threads;
 
-    const Matrix3 CAMERA_ROTATION = { 
-        0.7071f, 0.f, -0.7071f,
-        0.f, 1.f, 0.f,
-        0.7071f, 0, 0.7071f
-    };
+    //auto start = std::chrono::high_resolution_clock::now(); // Start the timer
 
-    const std::vector<Sphere> SPHERES = {
-        { {0, -1, 3}, 1, {0, 0, 255}, 500, 0.2f }, // red sphere
-        { {2, 0, 4}, 1, {255, 0, 0}, 500, 0.3f }, // blue sphere
-        { {-2, 0, 4 }, 1, { 0, 255, 0}, 10, 0.4f }, // green sphere
-        { {0, -5001, 0}, 5000, {0, 255, 255}, 1000, 0.5f } // yellow sphere
-    };
-
-    // Lights setup
-    const std::vector<Light> LIGHTS = {
-        { LightType::AMBIENT, 0.2f, {INFINITY, INFINITY, INFINITY} },
-        { LightType::POINT, 0.6f, {2, 1, 0} },
-        { LightType::DIRECTIONAL, 0.2f, {1, 4, 4} }
-    };
-
-    // Main rendering loop.
-    // the range of the x coordinate is [ –Cw/2, Cw/2 ) and the range of the y
-    // coordinate is [ –Ch/2, Ch/2 ).
-    for (int x = -CANVAS_WIDTH / 2; x < CANVAS_WIDTH / 2; ++x) {
-        for (int y = -CANVAS_HEIGHT / 2; y < CANVAS_HEIGHT / 2; ++y) {
-            Vector3 direction = CanvasToViewport(x, y);
-            direction = MultiplyMV(CAMERA_ROTATION, direction);
-            Color color = TraceRay(CAMERA_POSITION, direction, 1, INFINITY,
-                SPHERES, LIGHTS, RECURSION_DEPTH, nullptr);
-            PutPixel(x, y, Clamp(color));
+    // Create threads to render sections of the canvas
+    for (unsigned int i = 0; i < num_threads; ++i) {
+        int start_y = i * section_width - CANVAS_HEIGHT / 2;
+        int end_y = (i + 1) * section_width - CANVAS_HEIGHT / 2;
+        if (i == num_threads - 1) {
+            end_y = CANVAS_HEIGHT / 2;
         }
+
+        threads[i] = std::thread(RenderSection, start_y, end_y,
+            std::cref(SPHERES), std::cref(LIGHTS), std::cref(CAMERA_ROTATION),
+            std::cref(CAMERA_POSITION));
     }
 
+    // Join threads
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    //auto end = std::chrono::high_resolution_clock::now(); // Stop the timer
+    //auto duration = // Calculate the duration in milliseconds
+    //    std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    //std::string time_str = // Convert the duration to a string
+    //    "Time: " + std::to_string(duration.count()) + " milliseconds";
+         
     // Register the window class
     WNDCLASS wc = {};
     wc.lpfnWndProc = WndProc;
@@ -378,6 +413,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     }
 
     ShowWindow(hwnd, SW_SHOWNORMAL);
+
+    // Set the time_str as the window text
+    // SetWindowTextA(hwnd, time_str.c_str());
 
     // Main loop
     MSG msg;

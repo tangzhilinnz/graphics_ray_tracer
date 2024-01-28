@@ -8,6 +8,9 @@
 #include <string>
 #include <thread>
 
+using namespace std::chrono_literals;
+
+
 const int CANVAS_WIDTH = 600;
 const int CANVAS_HEIGHT = 600;
 const int RECURSION_DEPTH = 3; // 0, 1, 2, 3, 5
@@ -66,7 +69,8 @@ const std::vector<Sphere> SPHERES = {
     { {0, -1, 3}, 1, {0, 0, 255}, 500, 0.2f }, // red sphere
     { {2, 0, 4}, 1, {255, 0, 0}, 500, 0.3f }, // blue sphere
     { {-2, 0, 4 }, 1, { 0, 255, 0}, 10, 0.4f }, // green sphere
-    { {0, -5001, 0}, 5000, {0, 255, 255}, 1000, 0.5f } // yellow sphere
+    { {0, -5001, 0}, 5000, {0, 255, 255}, 1000, 0.5f }, // yellow sphere
+    { {0, 2, 2}, 2, {0, 255, 255}, 1000, 0.5f } // yellow sphere
 };
 
 // Lights setup
@@ -368,25 +372,30 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     std::vector<std::thread> threads(num_threads);
     int section_width = CANVAS_HEIGHT / num_threads;
 
+    int nSpeed = 2;
+    int nSpeedCount = 0;
+    bool bChangePosition = false;
+    Vector3 camera_pos = { 0.f, 0.f, 0.f };
+
     //auto start = std::chrono::high_resolution_clock::now(); // Start the timer
 
-    // Create threads to render sections of the canvas
-    for (unsigned int i = 0; i < num_threads; ++i) {
-        int start_y = i * section_width - CANVAS_HEIGHT / 2;
-        int end_y = (i + 1) * section_width - CANVAS_HEIGHT / 2;
-        if (i == num_threads - 1) {
-            end_y = CANVAS_HEIGHT / 2;
-        }
+    //// Create threads to render sections of the canvas
+    //for (unsigned int i = 0; i < num_threads; ++i) {
+    //    int start_y = i * section_width - CANVAS_HEIGHT / 2;
+    //    int end_y = (i + 1) * section_width - CANVAS_HEIGHT / 2;
+    //    if (i == num_threads - 1) {
+    //        end_y = CANVAS_HEIGHT / 2;
+    //    }
 
-        threads[i] = std::thread(RenderSection, start_y, end_y,
-            std::cref(SPHERES), std::cref(LIGHTS), std::cref(CAMERA_ROTATION),
-            std::cref(CAMERA_POSITION));
-    }
+    //    threads[i] = std::thread(RenderSection, start_y, end_y,
+    //        std::cref(SPHERES), std::cref(LIGHTS), std::cref(CAMERA_ROTATION),
+    //        std::cref(CAMERA_POSITION));
+    //}
 
-    // Join threads
-    for (auto& thread : threads) {
-        thread.join();
-    }
+    //// Join threads
+    //for (auto& thread : threads) {
+    //    thread.join();
+    //}
 
     //auto end = std::chrono::high_resolution_clock::now(); // Stop the timer
     //auto duration = // Calculate the duration in milliseconds
@@ -419,9 +428,57 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
 
     // Main loop
     MSG msg;
-    while (GetMessage(&msg, nullptr, 0, 0)) {
+    /*while (GetMessage(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
+    }*/
+
+    bool running = true;
+
+    while (running) {
+        while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                running = false;
+                break;
+            }
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+
+        std::this_thread::sleep_for(10ms);
+
+        // Create threads to render sections of the canvas
+        for (unsigned int i = 0; i < num_threads; ++i) {
+            int start_y = i * section_width - CANVAS_HEIGHT / 2;
+            int end_y = (i + 1) * section_width - CANVAS_HEIGHT / 2;
+            if (i == num_threads - 1) {
+                end_y = CANVAS_HEIGHT / 2;
+            }
+
+            threads[i] = std::thread(RenderSection, start_y, end_y,
+                std::cref(SPHERES), std::cref(LIGHTS), std::cref(CAMERA_ROTATION),
+                std::cref(camera_pos));
+        }
+
+        // Join threads
+        for (auto& thread : threads) {
+            thread.join();
+        }
+
+        nSpeedCount++;
+        bChangePosition = (nSpeedCount == nSpeed);
+
+        if (bChangePosition) {
+            nSpeedCount = 0;
+            camera_pos.x += 0.005f;
+            camera_pos.y += 0.001f;
+            camera_pos.z -= 0.001f;
+        }
+
+        // Update canvas
+        HDC hdc = GetDC(hwnd);
+        UpdateCanvas(hwnd, hdc, CANVAS_WIDTH, CANVAS_HEIGHT);
+        ReleaseDC(hwnd, hdc);
     }
 
     return 0;

@@ -1,4 +1,3 @@
-#include <windows.h>
 #include <vector>
 #include <array>
 #include <cmath>
@@ -7,6 +6,7 @@
 #include <chrono>
 #include <string>
 #include <thread>
+#include <windows.h>
 
 using namespace std::chrono_literals;
 
@@ -21,6 +21,13 @@ enum class LightType {
     AMBIENT = 0,
     POINT = 1,
     DIRECTIONAL = 2,
+};
+
+struct PointOnCanvas {
+    int x, y;
+
+    PointOnCanvas(int cx, int cy) : x(cx), y(cy) {}
+    ~PointOnCanvas() {}
 };
 
 struct Vector3 {
@@ -40,6 +47,8 @@ struct Matrix3 {
 
 struct Color {
     unsigned b, g, r;
+    Color(unsigned cb, unsigned cg, unsigned cr) : b(cb), g(cg), r(cr) {}
+    ~Color() {}
 };
 
 struct Sphere {
@@ -80,7 +89,7 @@ const std::vector<Light> LIGHTS = {
     { LightType::DIRECTIONAL, 0.2f, {1, 4, 4} }
 };
 
-const Color BACKGROUND_COLOR = {0, 0, 0};
+const Color BACKGROUND_COLOR = { 255, 255, 255 };
 
 void PutPixel(int x, int y, const Color& color) {
     int x_r = CANVAS_WIDTH / 2 + x;
@@ -182,163 +191,133 @@ Vector3 ReflectRayDirection(const Vector3& ray, const Vector3& normal) {
     return Subtract(Multiply(2 * DotProduct(ray, normal), normal), ray);
 }
 
-Vector3 CanvasToViewport(int canvas_x, int canvas_y) {
-    static float viewportSize_x = 1.0f;
-    static float viewportSize_y = 1.0f;
-    static float projectionPlaneZ = 1.0f;
-    return { canvas_x * viewportSize_x / CANVAS_WIDTH,
-             canvas_y* viewportSize_y / CANVAS_HEIGHT,
-             projectionPlaneZ };
-}
 
-std::pair<float, float> IntersectRaySphere(const Vector3& origin,
-    const Vector3& direction, const Sphere& sphere) {
-    Vector3 oc = Subtract(origin, sphere.center);
-
-    float k1 = DotProduct(direction, direction);
-    float k2 = 2 * DotProduct(oc, direction);
-    float k3 = DotProduct(oc, oc) - sphere.radius * sphere.radius;
-
-    float discriminant = k2 * k2 - 4 * k1 * k3;
-    if (discriminant < 0) {
-        return { INFINITY, INFINITY };
+void Interpolate(int i0, int d0, int i1, int d1, std::vector<float>& ds) {
+    if (i0 == i1) {
+        ds.push_back(static_cast<float>(d0));
     }
 
-    float t1 = (-k2 + std::sqrt(discriminant)) / (2 * k1);
-    float t2 = (-k2 - std::sqrt(discriminant)) / (2 * k1);
-    return { t1, t2 };
+    float a = static_cast<float>(d1 - d0) / (i1 - i0);
+    float d = static_cast<float>(d0);
+
+    for (int i = i0; i <= i1; i++) {
+        ds.push_back(d);
+        d += a;
+    }
 }
 
-float ComputeLighting(const Vector3& point, const Vector3& normal,
-    const Vector3& view, const std::vector<Light>& lights,
-    const std::vector<Sphere>& spheres, int specular, const Sphere* sphere_tag) {
-    float intensity = 0.0f;
-    float length_n = Length(normal);  // Should be 1.0, but just in case...
-    float length_v = Length(view);
+void DrawLine(const PointOnCanvas& p0, const PointOnCanvas& p1, const Color& color) {
+    int dx = p1.x - p0.x;
+    int dy = p1.y - p0.y;
+    std::vector<float> ds;
 
-    for (size_t i = 0; i < lights.size(); i++) {
-        auto& light = lights[i];
-
-        if (light.ltype == LightType::AMBIENT) {
-            intensity += light.intensity;
+    if (std::abs(dx) > std::abs(dy)) {
+        // The line is horizontal-ish. Make sure it's left to right.
+        if (dx < 0) {
+            auto swap = p0;
+            const_cast<PointOnCanvas&>(p0) = p1;
+            const_cast<PointOnCanvas&>(p1) = swap;
         }
-        else {
-            Vector3 vec_l;
-            float t_max;
-            if (light.ltype == LightType::POINT) {
-                vec_l = Subtract(light.position, point);
-                t_max = 1.0f;
-            }
-            else {  // Light.DIRECTIONAL
-                vec_l = light.position;
-                t_max = INFINITY;
-            }
 
-            bool is_shadow = false;
-            for (const auto& sphere : spheres) {
-                if (sphere_tag == &sphere)
-                    continue;
+        // Compute the Y values and draw.
+        Interpolate(p0.x, p0.y, p1.x, p1.y, ds);
 
-                auto ts = IntersectRaySphere(point, vec_l, sphere);
-                if (EPSILON < ts.first && ts.first < t_max) {
-                    is_shadow = true;
-                    break;
-                }
-                if (EPSILON < ts.second && ts.second < t_max) {
-                    is_shadow = true;
-                    break;
-                }
-            }
-            if (is_shadow) continue;
-
-            // Diffuse reflection
-            auto n_dot_l = DotProduct(normal, vec_l);
-            if (n_dot_l > 0)
-                intensity +=
-                light.intensity * n_dot_l / (length_n * Length(vec_l));
-
-            // Specular reflection
-            if (specular >= 0) {
-                Vector3 vec_r = ReflectRayDirection(vec_l, normal);
-
-                float r_dot_v = DotProduct(vec_r, view);
-                if (r_dot_v > 0)
-                    intensity += light.intensity *
-                    std::pow(r_dot_v / (Length(vec_r) * length_v), specular);
-            }
+        for (int x = p0.x; x <= p1.x; x++) {
+            PutPixel(x, static_cast<int>(ds[(x - p0.x) | 0]), color);
         }
     }
-
-    return intensity;
-}
-
-// color = (1 - r) * local_color + r * reflected_color || color = background_color
-// reflected_color = (1 - r1) * local_color1 + r1 * reflected_color1 || reflected_color = background_color
-// reflected_color1 = (1 - r2) * local_color2 + r2 * reflected_color2 || reflected_color1 = background_color
-// reflected_color2 = (1 - r3) * local_color3 + r3 * reflected_color3 || reflected_color2 = background_color
-// ... ... ... ...
-Color TraceRay(const Vector3& origin, const Vector3& direction, float min_t,
-    float max_t, const std::vector<Sphere>& spheres,
-    const std::vector<Light>& lights, int depth, const Sphere* sphere_tag/*, const Cache* cache*/) {
-    float closest_t = INFINITY;
-    const Sphere* closest_sphere = nullptr;
-
-    for (const auto& sphere : spheres) {
-        if (sphere_tag == &sphere)
-            continue;
-
-        auto ts = IntersectRaySphere(origin, direction, sphere/*, cache*/);
-        if (ts.first < closest_t && min_t < ts.first && ts.first < max_t) {
-            closest_t = ts.first;
-            closest_sphere = &sphere;
+    else {
+        // The line is verical-ish. Make sure it's bottom to top.
+        if (dy < 0) {
+            auto swap = p0;
+            const_cast<PointOnCanvas&>(p0) = p1;
+            const_cast<PointOnCanvas&>(p1) = swap;
         }
-        if (ts.second < closest_t && min_t < ts.second && ts.second < max_t) {
-            closest_t = ts.second;
-            closest_sphere = &sphere;
-        }
-    }
 
-    if (closest_sphere == nullptr)
-        return BACKGROUND_COLOR; // Background color white
+        // Compute the X values and draw.
+        Interpolate(p0.y, p0.x, p1.y, p1.x, ds);
 
-    Vector3 point = Add(origin, Multiply(closest_t, direction));
-    Vector3 normal = Subtract(point, closest_sphere->center);
-    normal = Multiply(1.0f / Length(normal), normal);
-
-    auto view = Multiply(-1, direction);
-    auto light_intensity = ComputeLighting(point, normal, view, lights, spheres,
-        closest_sphere->specular, closest_sphere);
-
-    auto local_color = Multiply(light_intensity, closest_sphere->color);
-
-    if (closest_sphere->reflective <= 0 || depth <= 0)
-        return local_color;
-
-    auto reflected_ray_direction = ReflectRayDirection(view, normal);
-    auto reflected_color = TraceRay(point, reflected_ray_direction, EPSILON,
-                                    INFINITY, spheres, lights, depth - 1,
-                                    closest_sphere);
-
-    return Add(Multiply(1 - closest_sphere->reflective, local_color),
-               Multiply(closest_sphere->reflective, reflected_color));
-}
-
-void RenderSection(int start_y, int end_y, const std::vector<Sphere>& spheres,
-    const std::vector<Light>& lights, const Matrix3& camera_rotation,
-    const Vector3& camera_position) {
-
-    for (int y = start_y; y < end_y; ++y) {
-        for (int x = -CANVAS_WIDTH / 2; x < CANVAS_WIDTH / 2; ++x) {
-            Vector3 direction = CanvasToViewport(x, y);
-            direction = MultiplyMV(camera_rotation, direction);
-
-            Color color = TraceRay(camera_position, direction, 1, INFINITY,
-                spheres, lights, RECURSION_DEPTH, nullptr/*, &cache*/);
-
-            PutPixel(x, y, Clamp(color));
+        for (int y = p0.y; y <= p1.y; y++) {
+            PutPixel(static_cast<int>(ds[(y - p0.y) | 0]), y, color);
         }
     }
 }
+
+void DrawWireframeTriangle(const PointOnCanvas& p0, const PointOnCanvas& p1, const PointOnCanvas& p2, const Color& color) {
+    DrawLine(p0, p1, color);
+    DrawLine(p1, p2, color);
+    DrawLine(p0, p2, color);
+}
+
+
+void DrawFilledTriangle(const PointOnCanvas& p0, const PointOnCanvas& p1, const PointOnCanvas& p2, const Color& color) {
+    // Sort the points from bottom to top.
+    if (p1.y < p0.y) {
+        auto swap = p0;
+        const_cast<PointOnCanvas&>(p0) = p1;
+        const_cast<PointOnCanvas&>(p1) = swap;
+    }
+    if (p2.y < p0.y) {
+        auto swap = p0;
+        const_cast<PointOnCanvas&>(p0) = p2;
+        const_cast<PointOnCanvas&>(p2) = swap;
+    }
+    if (p2.y < p1.y) {
+        auto swap = p1;
+        const_cast<PointOnCanvas&>(p1) = p2;
+        const_cast<PointOnCanvas&>(p2) = swap;
+    }
+
+    std::vector<float> x01;
+    std::vector<float> x12;
+    std::vector<float> x02;
+
+    // Compute X coordinates of the edges.
+    Interpolate(p0.y, p0.x, p1.y, p1.x, x01);
+    Interpolate(p1.y, p1.x, p2.y, p2.x, x12);
+    Interpolate(p0.y, p0.x, p2.y, p2.x, x01);
+
+    // Merge the two short sides.
+    x01.pop_back();
+    x01.insert(x01.end(), x12.begin(), x12.end());
+
+    // Determine which is left and which is right.
+    std::vector<float> *x_left, *x_right;
+    int m = (x02.size() / 2);
+    if (x02[m] < x01[m]) {
+        x_left = &x02;
+        x_right = &x01;
+    }
+    else {
+        x_left = &x01;
+        x_right = &x02;
+    }
+
+    // Draw horizontal segments.
+    for (int y = p0.y; y <= p2.y; y++) {
+        for (int x = static_cast<int>((*x_left)[y - p0.y]); x <= static_cast<int>((*x_right)[y - p0.y]); x++) {
+            PutPixel(x, y, color);
+        }
+    }
+}
+
+
+//void RenderSection(int start_y, int end_y, const std::vector<Sphere>& spheres,
+//    const std::vector<Light>& lights, const Matrix3& camera_rotation,
+//    const Vector3& camera_position) {
+//
+//    for (int y = start_y; y < end_y; ++y) {
+//        for (int x = -CANVAS_WIDTH / 2; x < CANVAS_WIDTH / 2; ++x) {
+//            Vector3 direction = CanvasToViewport(x, y);
+//            direction = MultiplyMV(camera_rotation, direction);
+//
+//            Color color = TraceRay(camera_position, direction, 1, INFINITY,
+//                spheres, lights, RECURSION_DEPTH, nullptr/*, &cache*/);
+//
+//            PutPixel(x, y, Clamp(color));
+//        }
+//    }
+//}
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     HDC hdc;
@@ -377,32 +356,50 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     bool bChangePosition = false;
     Vector3 camera_pos = { 0.f, 0.f, 0.f };
 
-    //auto start = std::chrono::high_resolution_clock::now(); // Start the timer
+    // initialize the canvasBuffer with white color as the background
+    for (int x = -CANVAS_WIDTH / 2; x < CANVAS_WIDTH / 2; x++)
+        for (int y = -CANVAS_HEIGHT / 2; y < CANVAS_HEIGHT / 2; y++)
+            PutPixel(x, y, BACKGROUND_COLOR);
 
-    //// Create threads to render sections of the canvas
-    //for (unsigned int i = 0; i < num_threads; ++i) {
-    //    int start_y = i * section_width - CANVAS_HEIGHT / 2;
-    //    int end_y = (i + 1) * section_width - CANVAS_HEIGHT / 2;
-    //    if (i == num_threads - 1) {
-    //        end_y = CANVAS_HEIGHT / 2;
-    //    }
+    auto start = std::chrono::high_resolution_clock::now(); // Start the timer
 
-    //    threads[i] = std::thread(RenderSection, start_y, end_y,
-    //        std::cref(SPHERES), std::cref(LIGHTS), std::cref(CAMERA_ROTATION),
-    //        std::cref(CAMERA_POSITION));
-    //}
+    /*DrawLine(PointOnCanvas(-200, -100), PointOnCanvas(240, 120), Color(0, 0, 0));
+    DrawLine(PointOnCanvas(-50, -200), PointOnCanvas(60, 240), Color(0, 0, 0));
+    DrawLine(PointOnCanvas(-50, -100), PointOnCanvas(-50, 100), Color(0, 0, 0));
+    DrawLine(PointOnCanvas(-50, -50), PointOnCanvas(60, 60), Color(0, 0, 0));
+    DrawLine(PointOnCanvas(-150, 100), PointOnCanvas(150, 100), Color(0, 0, 0));*/
 
-    //// Join threads
-    //for (auto& thread : threads) {
-    //    thread.join();
-    //}
+    auto p0 = PointOnCanvas(-200, -250);
+    auto p1 = PointOnCanvas(200, 50);
+    auto p2 = PointOnCanvas(20, 250);
 
-    //auto end = std::chrono::high_resolution_clock::now(); // Stop the timer
-    //auto duration = // Calculate the duration in milliseconds
-    //    std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    //std::string time_str = // Convert the duration to a string
-    //    "Time: " + std::to_string(duration.count()) + " milliseconds";
-         
+    DrawFilledTriangle(p0, p1, p2, Color(0, 255, 0));
+    DrawWireframeTriangle(p0, p1, p2, Color(0, 0, 0));
+
+    /*// Create threads to render sections of the canvas
+    for (unsigned int i = 0; i < num_threads; ++i) {
+        int start_y = i * section_width - CANVAS_HEIGHT / 2;
+        int end_y = (i + 1) * section_width - CANVAS_HEIGHT / 2;
+        if (i == num_threads - 1) {
+            end_y = CANVAS_HEIGHT / 2;
+        }
+
+        threads[i] = std::thread(RenderSection, start_y, end_y,
+            std::cref(SPHERES), std::cref(LIGHTS), std::cref(CAMERA_ROTATION),
+            std::cref(CAMERA_POSITION));
+    }
+
+    // Join threads
+    for (auto& thread : threads) {
+        thread.join();
+    }*/
+
+    auto end = std::chrono::high_resolution_clock::now(); // Stop the timer
+    auto duration = // Calculate the duration in milliseconds
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::string time_str = // Convert the duration to a string
+        "Time: " + std::to_string(duration.count()) + " milliseconds";
+
     // Register the window class
     WNDCLASS wc = {};
     wc.lpfnWndProc = WndProc;
@@ -424,16 +421,16 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     ShowWindow(hwnd, SW_SHOWNORMAL);
 
     // Set the time_str as the window text
-    // SetWindowTextA(hwnd, time_str.c_str());
+    SetWindowTextA(hwnd, time_str.c_str());
 
     // Main loop
     MSG msg;
-    /*while (GetMessage(&msg, nullptr, 0, 0)) {
+    while (GetMessage(&msg, nullptr, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
-    }*/
+    }
 
-    bool running = true;
+    /*bool running = true;
 
     while (running) {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -479,7 +476,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
         HDC hdc = GetDC(hwnd);
         UpdateCanvas(hwnd, hdc, CANVAS_WIDTH, CANVAS_HEIGHT);
         ReleaseDC(hwnd, hdc);
-    }
+    } */
 
     return 0;
 }
